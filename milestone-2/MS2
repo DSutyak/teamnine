@@ -1,0 +1,184 @@
+#define SENSOR_L_PIN 3
+#define SENSOR_R_PIN 2
+#define SERVO_L_PIN 10
+#define SERVO_R_PIN 11
+#define SENSOR_N_PIN A3
+#define SENSOR_E_PIN A4
+
+#define LOG_OUT 1
+#define FFT_N 256
+
+#include "Servo.h"
+#include <FFT.h>
+
+volatile long l_timer, r_timer;
+volatile int l_reading, l_prev, r_reading, r_prev;
+volatile bool l_white, r_white;
+
+Servo servo_l, servo_r;
+
+void setup_sensor(int pin, volatile long *sensor_timer) {
+  *sensor_timer = micros();
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, HIGH);
+  pinMode(pin, INPUT);
+}
+
+void l_isr() {
+  l_prev = l_reading;
+  l_reading = micros() - l_timer;
+  l_white = l_reading < 140 && l_prev < 140;
+  setup_sensor(SENSOR_L_PIN, &l_timer);
+}
+
+void r_isr() {
+  r_prev = r_reading;
+  r_reading = micros() - r_timer;
+  r_white = r_reading < 140 && r_prev < 140;
+  setup_sensor(SENSOR_R_PIN, &r_timer);
+}
+
+
+void l_forward() {
+  servo_l.write(180);
+}
+
+void r_forward() {
+  servo_r.write(0);
+}
+
+void l_backward() {
+  servo_l.write(0);
+}
+
+void r_backward() {
+  servo_r.write(180);
+}
+
+void follow_line() {
+  l_white ? l_backward() : l_forward();
+  r_white ? r_backward() : r_forward();
+}
+
+bool intersection() {
+  if (r_white && l_white)
+    return true;
+  else
+    return false;
+}
+
+void r_turn() {
+  l_forward();
+  r_forward();
+  if (!l_white && !r_white){
+    //intersection = false;
+    delay(100);
+    r_backward();
+    delay(500);
+    l_forward();
+    r_forward();
+  } 
+}
+
+void l_turn() {
+  l_forward();
+  r_forward();
+  if (!l_white && !r_white){
+    delay(100);
+    l_backward();
+    delay(500);
+    l_forward();
+    r_forward();
+  } 
+}
+
+bool box_R;
+
+bool north_wall() {
+  if (analogRead(SENSOR_N_PIN) < 150)
+    return true; //will print 0
+  else
+    return false; //will print 1
+}
+
+bool east_wall() {
+  if (analogRead(SENSOR_E_PIN) < 150)
+    return true;
+  else
+    return false;
+}
+
+void RH_follow(){
+  if (east_wall() && !north_wall())
+    box_R = true;
+  if (north_wall())
+    l_turn();
+  if (!east_wall() && !north_wall() && box_R)
+    r_turn();
+    box_R = east_wall();
+}
+
+void FFT_setup() {
+  TIMSK0 = 0;
+  ADCSRA = 0xe7;
+  ADMUX = 0x40;
+  DIDR0 = 0x01;
+}
+
+bool robot_present() {
+    cli();  // UDRE interrupt slows this way down on arduino1.0
+    for (int i = 0 ; i < 512 ; i += 2) { // save 256 samples
+      while (!(ADCSRA & 0x10)); // wait for adc to be ready
+      ADCSRA = 0xf7; // restart adc
+      byte m = ADCL; // fetch adc data
+      byte j = ADCH;
+      int k = (j << 8) | m; // form into an int
+      k -= 0x0200; // form into a signed int
+      k <<= 6; // form into a 16b signed int
+      fft_input[i] = k; // put real data into even bins
+      fft_input[i+1] = 0; // set odd bins to 0
+    }
+    fft_window(); // window the data for better frequency response
+    fft_reorder(); // reorder the data before doing the fft
+    fft_run(); // process the data in the fft
+    fft_mag_log(); // take the output of the fft
+    sei();
+
+    if (fft_log_out[42] > 100)
+      return true;
+    else
+      return false;
+}
+
+void avoid_robot(){
+  if (robot_present())
+    l_turn();
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  attachInterrupt(digitalPinToInterrupt(SENSOR_R_PIN), r_isr, LOW);
+  attachInterrupt(digitalPinToInterrupt(SENSOR_L_PIN), l_isr, LOW);
+  
+  setup_sensor(SENSOR_R_PIN, &r_timer);
+  setup_sensor(SENSOR_L_PIN, &l_timer);
+  
+  servo_l.attach(SERVO_L_PIN);
+  servo_r.attach(SERVO_R_PIN);
+
+  FFT_setup();
+
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  delay(10);
+}
+
+
+void loop() {
+  if (intersection()) {
+    RH_follow();
+    avoid_robot();
+    follow_line();
+  }
+}
